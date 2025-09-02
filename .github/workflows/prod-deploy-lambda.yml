@@ -55,7 +55,7 @@ jobs:
       run: |
         cat > overrides.json <<EOL
         {
-          "DynamoDBTable": "${{ vars.DYNAMODB_TABLE }}"
+          "DynamoDBTable": "${{ vars.DYNAMODB_TABLE }}",
           "APIKey": "${{ vars.STATIC_API_KEY }"
         }
         EOL
