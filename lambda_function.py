@@ -12,7 +12,7 @@ dynamodb = boto3.resource("dynamodb")
 DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "bedrock_usage")
 
 # Static API key
-API_KEY = os.environ.get("API_KEY")
+API_KEY = os.environ.get("STATIC_API_KEY")
 
 
 def get_service_costs(start, end, services):
