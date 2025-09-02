@@ -202,23 +202,14 @@ def lambda_handler(event, context):
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-        # Convert all floats to Decimal for DynamoDB
-        def convert_floats_to_decimal(obj):
-            if isinstance(obj, float):
-                return Decimal(str(obj))
-            elif isinstance(obj, dict):
-                return {k: convert_floats_to_decimal(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_floats_to_decimal(i) for i in obj]
-            else:
-                return obj
-
-        report_decimal = convert_floats_to_decimal(report)
-
-        # Save to DynamoDB
+        # Save to DynamoDB (store as JSON string to avoid DynamoDB type formatting)
         track_id = str(uuid.uuid4())
         table = dynamodb.Table(DYNAMODB_TABLE)
-        table.put_item(Item={"track_id": track_id, "report": report_decimal})
+        table.put_item(Item={
+            "track_id": track_id, 
+            "report": json.dumps(report),  # Store as JSON string
+            "created_at": datetime.utcnow().isoformat()
+        })
 
         return {"statusCode": 200, "body": json.dumps({"message": "Report saved", "track_id": track_id}, indent=2)}
 
