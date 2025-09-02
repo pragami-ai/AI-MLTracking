@@ -1,0 +1,88 @@
+name: PROD - Deploy Python Lambda via AWS SAM
+
+on:
+  push:
+    branches: [ prod ] # Deploy on push to main branch
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Set up AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+      with:
+        aws-access-key-id: ${{ vars.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ vars.AWS_SECRET_ACCESS_KEY }}
+        aws-region: eu-central-1
+
+
+    - name: Install AWS SAM CLI
+      run: |
+        pip install aws-sam-cli
+
+    - name: Build SAM application
+      run: |
+        sam build --use-container
+
+    - name: Package SAM application
+      run: |
+        sam package \
+          --output-template-file packaged.yaml \
+          --s3-bucket outlawml-sam-package-bucket-prod
+
+    # - name: Replace placeholders in params.json
+    #   run: |
+    #     jq --arg val "${{ vars.ANTHROPIC_API_KEY }}" \
+    #        '.ANTHROPICAPIKEY = $val' params.json > params.tmp && mv params.tmp params.json
+
+    - name: Create overrides.json from secrets
+      run: |
+        cat > overrides.json <<EOL
+        {
+          "DynamoDBTable": "${{ vars.DYNAMODB_TABLE }}"
+          "APIKey": "${{ vars.STATIC_API_KEY }"
+        }
+        EOL
+
+
+    # - name: Print overrides.json for validation
+    #   run: |
+    #     echo "===== overrides.json after replacement ====="
+    #     cat overrides.json
+
+    - name: Deploy SAM application
+      run: |
+        # PARAMS=$(jq -r 'to_entries | map("\(.key)=\(.value)") | join(" ")' overrides.json)
+        read -r -a PARAM_ARR <<< "$(jq -r 'to_entries | map("\(.key)=\(.value)") | join(" ")' overrides.json)"
+
+        # echo $PARAMS
+
+        sam deploy \
+          --template-file packaged.yaml \
+          --stack-name AI-MLTracking \
+          --capabilities CAPABILITY_IAM \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --config-env prod \
+          --parameter-overrides "${PARAM_ARR[@]}"
+
+
+
+

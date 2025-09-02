@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: ML Usage Tracker Lambda with API Gateway POST endpoint
+
+Parameters:
+  DynamoDBTable:
+    Type: String
+    Description: Name of the DynamoDB table
+  APIKey:
+    Type: String  
+    Description: Static API Key for authentication
+
+
+Resources:
+  MLUsageTrackerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ml-usage-tracker
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      CodeUri: .
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DynamoDBTable
+          STATIC_API_KEY: !Ref APIKey
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/*
+              - Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                Resource: "*"
+      Events:
+        TrackAPI:
+          Type: Api
+          Properties:
+            Path: /track
+            Method: post
+
+Outputs:
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref MLUsageTrackerFunction
+  TrackAPIEndpoint:
+    Description: URL for POST /track
+    Value: !Sub "https://${MLUsageTrackerFunction.Api}.execute-api.${AWS::Region}.amazonaws.com/track"
+  DynamoDBTableName:
+    Description: DynamoDB table passed in
+    Value: !Ref DynamoDBTable
