@@ -5,7 +5,8 @@ import uuid
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-ce = boto3.client("ce")
+ce = boto3.client("ce", region_name="us-east-1")
+
 dynamodb = boto3.resource("dynamodb")
 
 # Env variable
