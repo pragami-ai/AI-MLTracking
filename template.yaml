@@ -40,9 +40,12 @@ Outputs:
   LambdaFunctionName:
     Description: Name of the Lambda function
     Value: !Ref MLUsageTrackerFunction
+
   TrackAPIEndpoint:
     Description: URL for POST /track
-    Value: !Sub "https://${MLUsageTrackerFunction.Api}.execute-api.${AWS::Region}.amazonaws.com/track"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/track"
+
   DynamoDBTableName:
     Description: DynamoDB table passed in
     Value: !Ref DynamoDBTable
+
