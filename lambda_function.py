@@ -8,7 +8,6 @@ from decimal import Decimal
 
 
 ce = boto3.client("ce", region_name="us-east-1")
-
 dynamodb = boto3.resource("dynamodb")
 
 # Env variable
@@ -84,6 +83,74 @@ def get_service_costs(start, end, services):
     return daily_costs
 
 
+def aggregate_cost_data(claude_daily, bedrock_daily):
+    """Aggregate daily cost data into model and region summaries"""
+    
+    # Combine all data
+    all_data = {}
+    for date, services in claude_daily.items():
+        if date not in all_data:
+            all_data[date] = {}
+        all_data[date].update(services)
+    
+    for date, services in bedrock_daily.items():
+        if date not in all_data:
+            all_data[date] = {}
+        all_data[date].update(services)
+    
+    # Initialize aggregation structures
+    model_totals = defaultdict(float)
+    model_regions = defaultdict(lambda: defaultdict(float))
+    region_totals = defaultdict(float)
+    region_models = defaultdict(lambda: defaultdict(float))
+    grand_total = 0
+    
+    # Aggregate data
+    for date, services in all_data.items():
+        for service, usage_list in services.items():
+            for usage_data in usage_list:
+                amount = usage_data['amount']
+                region = usage_data['region']
+                
+                # Add to model totals
+                model_totals[service] += amount
+                model_regions[service][region] += amount
+                
+                # Add to region totals
+                region_totals[region] += amount
+                region_models[region][service] += amount
+                
+                # Add to grand total
+                grand_total += amount
+    
+    # Build model summary
+    by_model = {}
+    for model, total_cost in model_totals.items():
+        percentage = round((total_cost / grand_total) * 100, 1) if grand_total > 0 else 0
+        regions = {region: {"cost": round(cost, 4)} for region, cost in model_regions[model].items()}
+        
+        by_model[model] = {
+            "total_cost": round(total_cost, 4),
+            "percentage": percentage,
+            "regions": regions
+        }
+    
+    # Build region summary
+    by_region = {}
+    for region, total_cost in region_totals.items():
+        models = {model: {"cost": round(cost, 4)} for model, cost in region_models[region].items()}
+        
+        by_region[region] = {
+            "total_cost": round(total_cost, 4),
+            "models": models
+        }
+    
+    return {
+        "by_model": by_model,
+        "by_region": by_region
+    }, grand_total
+
+
 def lambda_handler(event, context):
     try:
         # Check API key
@@ -120,16 +187,8 @@ def lambda_handler(event, context):
         claude_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), claude_services)
         bedrock_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), bedrock_services)
 
-        # Combine and calculate grand total
-        all_dates = set(list(claude_daily.keys()) + list(bedrock_daily.keys()))
-        grand_total = 0
-        for date in all_dates:
-            date_total = 0
-            for service, usage_list in claude_daily.get(date, {}).items():
-                date_total += sum(u["amount"] for u in usage_list)
-            for service, usage_list in bedrock_daily.get(date, {}).items():
-                date_total += sum(u["amount"] for u in usage_list)
-            grand_total += date_total
+        # Aggregate the data into the expected format
+        model_usage_summary, grand_total = aggregate_cost_data(claude_daily, bedrock_daily)
 
         # Build report
         report = {
@@ -138,13 +197,12 @@ def lambda_handler(event, context):
                 "end_date": end.strftime("%Y-%m-%d"),
                 "days_analyzed": days
             },
-            "grand_total": grand_total,
+            "model_usage_summary": model_usage_summary,
+            "grand_total": round(grand_total, 4),
             "timestamp": datetime.utcnow().isoformat(),
         }
 
         # Convert all floats to Decimal for DynamoDB
-        from decimal import Decimal
-
         def convert_floats_to_decimal(obj):
             if isinstance(obj, float):
                 return Decimal(str(obj))
