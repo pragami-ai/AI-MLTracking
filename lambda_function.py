@@ -4,6 +4,8 @@ import os
 import uuid
 from datetime import datetime, timedelta
 from collections import defaultdict
+from decimal import Decimal
+
 
 ce = boto3.client("ce", region_name="us-east-1")
 
@@ -131,15 +133,34 @@ def lambda_handler(event, context):
 
         # Build report
         report = {
-            "period": {"start_date": start.strftime("%Y-%m-%d"), "end_date": end.strftime("%Y-%m-%d"), "days_analyzed": days},
-            "grand_total": round(grand_total, 4),
+            "period": {
+                "start_date": start.strftime("%Y-%m-%d"),
+                "end_date": end.strftime("%Y-%m-%d"),
+                "days_analyzed": days
+            },
+            "grand_total": grand_total,
             "timestamp": datetime.utcnow().isoformat(),
         }
+
+        # Convert all floats to Decimal for DynamoDB
+        from decimal import Decimal
+
+        def convert_floats_to_decimal(obj):
+            if isinstance(obj, float):
+                return Decimal(str(obj))
+            elif isinstance(obj, dict):
+                return {k: convert_floats_to_decimal(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_floats_to_decimal(i) for i in obj]
+            else:
+                return obj
+
+        report_decimal = convert_floats_to_decimal(report)
 
         # Save to DynamoDB
         track_id = str(uuid.uuid4())
         table = dynamodb.Table(DYNAMODB_TABLE)
-        table.put_item(Item={"track_id": track_id, "report": report})
+        table.put_item(Item={"track_id": track_id, "report": report_decimal})
 
         return {"statusCode": 200, "body": json.dumps({"message": "Report saved", "track_id": track_id}, indent=2)}
 
