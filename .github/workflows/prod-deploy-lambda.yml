@@ -57,7 +57,7 @@ jobs:
         {
           "DynamoDBTable": "${{ vars.DYNAMODB_TABLE }}",
           "APIKey": "${{ vars.STATIC_API_KEY }}",
-          "SocialLensTableName": "${{ vars.SOCIAL_LENS_TABLE_NAME }}"
+          "SocialLensTableName": "${{ vars.SOCIAL_LENS_TABLE }}"
         }
         EOL
 
