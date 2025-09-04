@@ -298,157 +298,136 @@ def get_perplexity_costs(start_date, end_date):
 
 def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
     """Aggregate daily cost data into model and region summaries with detailed Perplexity metrics"""
-    
+
     print(f"DEBUG: Aggregating data - Claude: {len(claude_daily)} days, Bedrock: {len(bedrock_daily)} days, Perplexity: {len(perplexity_daily)} days")
-    
+
     # Combine all data
     all_data = {}
     for date, services in claude_daily.items():
         if date not in all_data:
             all_data[date] = {}
         all_data[date].update(services)
-    
+
     for date, services in bedrock_daily.items():
         if date not in all_data:
             all_data[date] = {}
         all_data[date].update(services)
-    
+
     for date, services in perplexity_daily.items():
         if date not in all_data:
             all_data[date] = {}
         all_data[date].update(services)
         print(f"DEBUG: Added Perplexity data for date {date}: {len(services.get('Perplexity API', []))} entries")
-    
+
     print(f"DEBUG: Combined data has {len(all_data)} dates")
-    
+
     # Initialize aggregation structures
     model_totals = defaultdict(float)
     model_regions = defaultdict(lambda: defaultdict(float))
     region_totals = defaultdict(float)
     region_models = defaultdict(lambda: defaultdict(float))
     grand_total = 0
-    
+
     # Track detailed metrics for Perplexity
     perplexity_metrics = {
         "api_calls": 0,
         "total_requests": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
         "total_tokens": 0,
-        "domains_processed": 0,
-        "unique_domains": set(),
-        "daily_breakdown": {}
+        "total_domains_processed": 0,
+        "unique_domains": set()
     }
-    
+
     # Aggregate data
     for date, services in all_data.items():
         for service, usage_list in services.items():
-            daily_perplexity_cost = 0
-            daily_perplexity_requests = 0
-            daily_perplexity_tokens = 0
-            
             for usage_data in usage_list:
                 amount = usage_data['amount']
                 region = usage_data['region']
-                
+
                 # Track detailed metrics for Perplexity
                 if service == "Perplexity API":
                     perplexity_metrics["api_calls"] += 1
                     perplexity_metrics["total_requests"] += usage_data.get('requests', 0)
-                    perplexity_metrics["prompt_tokens"] += usage_data.get('prompt_tokens', 0)
-                    perplexity_metrics["completion_tokens"] += usage_data.get('completion_tokens', 0)
+                    perplexity_metrics["total_prompt_tokens"] += usage_data.get('prompt_tokens', 0)
+                    perplexity_metrics["total_completion_tokens"] += usage_data.get('completion_tokens', 0)
                     perplexity_metrics["total_tokens"] += usage_data.get('total_tokens', 0)
-                    perplexity_metrics["domains_processed"] += usage_data.get('domains_processed', 0)
-                    
-                    # Track daily metrics
-                    daily_perplexity_cost += amount
-                    daily_perplexity_requests += usage_data.get('requests', 0)
-                    daily_perplexity_tokens += usage_data.get('total_tokens', 0)
-                    
+                    perplexity_metrics["total_domains_processed"] += usage_data.get('domains_processed', 0)
+
                     # Extract unique domains
                     domain_details = usage_data.get('domain_details', [])
                     for domain_detail in domain_details:
                         domain_name = domain_detail.get('domain', 'unknown')
                         perplexity_metrics["unique_domains"].add(domain_name)
-                    
+
                     print(f"DEBUG: Perplexity entry - Date: {date}, Cost: ${amount}, Requests: {usage_data.get('requests', 0)}, Tokens: {usage_data.get('total_tokens', 0)}")
-                
+
                 # Add to model totals
                 model_totals[service] += amount
                 model_regions[service][region] += amount
-                
+
                 # Add to region totals
                 region_totals[region] += amount
                 region_models[region][service] += amount
-                
+
                 # Add to grand total
                 grand_total += amount
-            
-            # Store daily Perplexity breakdown
-            if service == "Perplexity API" and daily_perplexity_cost > 0:
-                perplexity_metrics["daily_breakdown"][date] = {
-                    "cost": round(daily_perplexity_cost, 4),
-                    "requests": daily_perplexity_requests,
-                    "tokens": daily_perplexity_tokens,
-                    "entries": len(usage_list)
-                }
-    
+
     # Convert unique domains set to list for JSON serialization
     perplexity_metrics["unique_domains"] = list(perplexity_metrics["unique_domains"])
-    
+
     print(f"DEBUG: Model totals: {dict(model_totals)}")
     print(f"DEBUG: Perplexity detailed metrics:")
     print(f"DEBUG:   API Calls: {perplexity_metrics['api_calls']}")
     print(f"DEBUG:   Total Requests: {perplexity_metrics['total_requests']}")
-    print(f"DEBUG:   Prompt Tokens: {perplexity_metrics['prompt_tokens']}")
-    print(f"DEBUG:   Completion Tokens: {perplexity_metrics['completion_tokens']}")
+    print(f"DEBUG:   Prompt Tokens: {perplexity_metrics['total_prompt_tokens']}")
+    print(f"DEBUG:   Completion Tokens: {perplexity_metrics['total_completion_tokens']}")
     print(f"DEBUG:   Total Tokens: {perplexity_metrics['total_tokens']}")
     print(f"DEBUG:   Unique Domains: {len(perplexity_metrics['unique_domains'])}")
-    
+
     # Build model summary
     by_model = {}
     for model, total_cost in model_totals.items():
         percentage = round((total_cost / grand_total) * 100, 1) if grand_total > 0 else 0
         regions = {region: {"cost": round(cost, 4)} for region, cost in model_regions[model].items()}
-        
+
         model_data = {
             "total_cost": round(total_cost, 4),
             "percentage": percentage,
             "regions": regions
         }
-        
+
         # Add detailed metrics for Perplexity
         if model == "Perplexity API":
             model_data.update({
                 "api_calls": perplexity_metrics["api_calls"],
                 "total_requests": perplexity_metrics["total_requests"],
-                "prompt_tokens": perplexity_metrics["prompt_tokens"],
-                "completion_tokens": perplexity_metrics["completion_tokens"],
+                "total_prompt_tokens": perplexity_metrics["total_prompt_tokens"],
+                "total_completion_tokens": perplexity_metrics["total_completion_tokens"],
                 "total_tokens": perplexity_metrics["total_tokens"],
-                "domains_processed": perplexity_metrics["domains_processed"],
+                "total_domains_processed": perplexity_metrics["total_domains_processed"],
                 "unique_domains_count": len(perplexity_metrics["unique_domains"]),
-                "unique_domains": perplexity_metrics["unique_domains"],
-                "daily_breakdown": perplexity_metrics["daily_breakdown"],
-                "avg_cost_per_request": round(total_cost / perplexity_metrics["total_requests"], 6) if perplexity_metrics["total_requests"] > 0 else 0,
-                "avg_tokens_per_request": round(perplexity_metrics["total_tokens"] / perplexity_metrics["total_requests"], 1) if perplexity_metrics["total_requests"] > 0 else 0
+                "unique_domains": perplexity_metrics["unique_domains"]
             })
-        
+
         by_model[model] = model_data
-    
+
     # Build region summary
     by_region = {}
     for region, total_cost in region_totals.items():
         models = {model: {"cost": round(cost, 4)} for model, cost in region_models[region].items()}
-        
+
         by_region[region] = {
             "total_cost": round(total_cost, 4),
             "models": models
         }
-    
+
     return {
         "by_model": by_model,
         "by_region": by_region
     }, grand_total
+
 
 
 def lambda_handler(event, context):
