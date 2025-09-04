@@ -5,11 +5,18 @@ Description: ML Usage Tracker Lambda with API Gateway POST endpoint
 Parameters:
   DynamoDBTable:
     Type: String
-    Description: Name of the DynamoDB table
+    Description: Name of the DynamoDB table for storing reports
   APIKey:
     Type: String  
     Description: Static API Key for authentication
-
+  SocialLensTableName:
+    Type: String
+    Description: Name of the existing Social_Lens DynamoDB table
+    Default: Social_Lens
+  SocialLensTableArn:
+    Type: String
+    Description: ARN of the existing Social_Lens DynamoDB table
+    Default: arn:aws:dynamodb:ap-south-1:069717477936:table/Social_Lens
 
 Resources:
   MLUsageTrackerFunction:
@@ -20,21 +27,35 @@ Resources:
       Handler: lambda_function.lambda_handler
       CodeUri: .
       MemorySize: 256
-      Timeout: 30
+      Timeout: 60  # Increased timeout for scanning large DynamoDB table
       Environment:
         Variables:
           DYNAMODB_TABLE: !Ref DynamoDBTable
+          SOCIAL_LENS_TABLE: !Ref SocialLensTableName
           STATIC_API_KEY: !Ref APIKey
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref DynamoDBTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Scan
+                - dynamodb:Query
+                - dynamodb:GetItem
+              Resource: !Ref SocialLensTableArn
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ce:GetCostAndUsage
+              Resource: '*'
       Events:
         ApiEvent:
           Type: Api
           Properties:
             Path: /track
             Method: post
-
 
 Outputs:
   LambdaFunctionName:
@@ -46,6 +67,9 @@ Outputs:
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/track"
 
   DynamoDBTableName:
-    Description: DynamoDB table passed in
+    Description: DynamoDB table for storing reports
     Value: !Ref DynamoDBTable
 
+  SocialLensTableName:
+    Description: Social_Lens DynamoDB table for Perplexity cost analysis
+    Value: !Ref SocialLensTableName

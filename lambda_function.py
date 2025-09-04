@@ -5,13 +5,15 @@ import uuid
 from datetime import datetime, timedelta
 from collections import defaultdict
 from decimal import Decimal
+from boto3.dynamodb.conditions import Key, Attr
 
 
 ce = boto3.client("ce", region_name="us-east-1")
 dynamodb = boto3.resource("dynamodb")
 
-# Env variable
+# Env variables
 DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE", "bedrock_usage")
+SOCIAL_LENS_TABLE = os.environ.get("SOCIAL_LENS_TABLE", "Social_Lens")
 
 # Static API key
 API_KEY = os.environ.get("STATIC_API_KEY")
@@ -83,7 +85,94 @@ def get_service_costs(start, end, services):
     return daily_costs
 
 
-def aggregate_cost_data(claude_daily, bedrock_daily):
+def get_perplexity_costs(start_date, end_date):
+    """Fetch Perplexity API costs from Social_Lens DynamoDB table"""
+    try:
+        # Connect to the Social_Lens table in ap-south-1 region
+        social_lens_dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
+        table = social_lens_dynamodb.Table(SOCIAL_LENS_TABLE)
+        
+        # Convert dates to datetime for comparison
+        start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+        end_datetime = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)  # Include end date
+        
+        # Scan the table to get all items (you might want to optimize this with a GSI if table is large)
+        response = table.scan()
+        items = response['Items']
+        
+        # Handle pagination if there are more items
+        while 'LastEvaluatedKey' in response:
+            response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
+            items.extend(response['Items'])
+        
+        # Process the data by date
+        daily_perplexity_costs = defaultdict(list)
+        
+        for item in items:
+            try:
+                # Extract completed_at and ml_cost
+                completed_at = item.get('completed_at')
+                ml_cost = item.get('ml_cost')
+                
+                if not completed_at or ml_cost is None:
+                    continue
+                
+                # Parse the completed_at timestamp (assuming ISO format)
+                if isinstance(completed_at, str):
+                    # Handle different possible timestamp formats
+                    try:
+                        if 'T' in completed_at:
+                            item_datetime = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+                        else:
+                            item_datetime = datetime.strptime(completed_at, "%Y-%m-%d")
+                    except:
+                        # Skip items with unparseable dates
+                        continue
+                else:
+                    # Skip if completed_at is not a string
+                    continue
+                
+                # Check if the item is within our date range
+                if start_datetime <= item_datetime < end_datetime:
+                    item_date = item_datetime.strftime("%Y-%m-%d")
+                    
+                    # Convert ml_cost to float
+                    if isinstance(ml_cost, Decimal):
+                        cost_amount = float(ml_cost)
+                    elif isinstance(ml_cost, (int, float)):
+                        cost_amount = float(ml_cost)
+                    elif isinstance(ml_cost, str):
+                        try:
+                            cost_amount = float(ml_cost)
+                        except ValueError:
+                            continue
+                    else:
+                        continue
+                    
+                    # Add to daily costs with Bedrock-like structure
+                    daily_perplexity_costs[item_date].append({
+                        "usage_type": "API-Call",
+                        "region": "us-east-1",  # Default region for API calls
+                        "amount": cost_amount
+                    })
+                    
+            except Exception as e:
+                # Skip problematic items and continue processing
+                print(f"Error processing item: {e}")
+                continue
+        
+        # Convert to the same format as Bedrock data
+        formatted_costs = defaultdict(lambda: defaultdict(list))
+        for date, cost_list in daily_perplexity_costs.items():
+            formatted_costs[date]["Perplexity API"] = cost_list
+        
+        return formatted_costs
+        
+    except Exception as e:
+        raise Exception(f"Error fetching Perplexity cost data: {e}")
+
+
+def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
     """Aggregate daily cost data into model and region summaries"""
     
     # Combine all data
@@ -98,6 +187,11 @@ def aggregate_cost_data(claude_daily, bedrock_daily):
             all_data[date] = {}
         all_data[date].update(services)
     
+    for date, services in perplexity_daily.items():
+        if date not in all_data:
+            all_data[date] = {}
+        all_data[date].update(services)
+    
     # Initialize aggregation structures
     model_totals = defaultdict(float)
     model_regions = defaultdict(lambda: defaultdict(float))
@@ -105,12 +199,19 @@ def aggregate_cost_data(claude_daily, bedrock_daily):
     region_models = defaultdict(lambda: defaultdict(float))
     grand_total = 0
     
+    # Track API call counts for Perplexity
+    perplexity_call_count = 0
+    
     # Aggregate data
     for date, services in all_data.items():
         for service, usage_list in services.items():
             for usage_data in usage_list:
                 amount = usage_data['amount']
                 region = usage_data['region']
+                
+                # Count API calls for Perplexity
+                if service == "Perplexity API":
+                    perplexity_call_count += 1
                 
                 # Add to model totals
                 model_totals[service] += amount
@@ -129,11 +230,17 @@ def aggregate_cost_data(claude_daily, bedrock_daily):
         percentage = round((total_cost / grand_total) * 100, 1) if grand_total > 0 else 0
         regions = {region: {"cost": round(cost, 4)} for region, cost in model_regions[model].items()}
         
-        by_model[model] = {
+        model_data = {
             "total_cost": round(total_cost, 4),
             "percentage": percentage,
             "regions": regions
         }
+        
+        # Add API call count for Perplexity
+        if model == "Perplexity API":
+            model_data["api_calls"] = perplexity_call_count
+        
+        by_model[model] = model_data
     
     # Build region summary
     by_region = {}
@@ -186,9 +293,12 @@ def lambda_handler(event, context):
         # Get daily costs
         claude_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), claude_services)
         bedrock_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), bedrock_services)
+        
+        # Get Perplexity costs
+        perplexity_daily = get_perplexity_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
 
         # Aggregate the data into the expected format
-        model_usage_summary, grand_total = aggregate_cost_data(claude_daily, bedrock_daily)
+        model_usage_summary, grand_total = aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily)
 
         # Build report
         report = {
