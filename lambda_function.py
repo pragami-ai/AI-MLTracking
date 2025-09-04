@@ -102,7 +102,7 @@ def get_perplexity_costs(start_date, end_date):
         
         print(f"DEBUG: Date range converted - Start: {start_datetime}, End: {end_datetime}")
         
-        # Scan the table to get all items (you might want to optimize this with a GSI if table is large)
+        # Scan the table to get all items
         response = table.scan()
         items = response['Items']
         
@@ -123,8 +123,11 @@ def get_perplexity_costs(start_date, end_date):
             print(f"DEBUG: Sample item structure:")
             sample_item = items[0]
             print(f"DEBUG: Sample keys: {list(sample_item.keys())}")
+            # Check for both completed_at and created_at
             if 'completed_at' in sample_item:
                 print(f"DEBUG: Sample completed_at: {sample_item['completed_at']}")
+            if 'created_at' in sample_item:
+                print(f"DEBUG: Sample created_at: {sample_item['created_at']}")
             if 'ml_cost' in sample_item:
                 print(f"DEBUG: Sample ml_cost: {sample_item['ml_cost']} (type: {type(sample_item['ml_cost'])})")
         
@@ -137,32 +140,59 @@ def get_perplexity_costs(start_date, end_date):
         for item in items:
             processed_count += 1
             try:
-                # Extract completed_at and ml_cost
-                completed_at = item.get('completed_at')
-                ml_cost = item.get('ml_cost')
+                # Extract timestamp - try both completed_at and created_at
+                timestamp = item.get('completed_at') or item.get('created_at')
+                ml_cost_data = item.get('ml_cost')
                 
-                if not completed_at or ml_cost is None:
+                if not timestamp or ml_cost_data is None:
+                    if processed_count <= 5:  # Debug first few items
+                        print(f"DEBUG: Item {processed_count} skipped - timestamp: {timestamp}, ml_cost: {ml_cost_data}")
                     continue
                 
-                # Parse the completed_at timestamp (assuming ISO format)
-                if isinstance(completed_at, str):
-                    # Handle different possible timestamp formats
+                # Parse ml_cost - it's a JSON object, we need the total_cost
+                total_cost = None
+                if isinstance(ml_cost_data, dict):
+                    total_cost = ml_cost_data.get('total_cost')
+                elif isinstance(ml_cost_data, str):
                     try:
-                        if 'T' in completed_at:
-                            # Handle ISO format with timezone
-                            completed_at_clean = completed_at.replace('Z', '+00:00')
-                            if '+' not in completed_at_clean and completed_at_clean.endswith('00:00'):
-                                pass  # Already has timezone
-                            elif '+' not in completed_at_clean and 'Z' not in completed_at:
-                                completed_at_clean = completed_at + '+00:00'
-                            item_datetime = datetime.fromisoformat(completed_at_clean)
-                        else:
-                            item_datetime = datetime.strptime(completed_at, "%Y-%m-%d")
-                    except Exception as parse_error:
-                        print(f"DEBUG: Failed to parse date '{completed_at}': {parse_error}")
+                        ml_cost_json = json.loads(ml_cost_data)
+                        total_cost = ml_cost_json.get('total_cost')
+                    except json.JSONDecodeError:
+                        print(f"DEBUG: Failed to parse ml_cost JSON: {ml_cost_data}")
                         continue
+                elif isinstance(ml_cost_data, Decimal):
+                    # If it's just a Decimal, use it directly
+                    total_cost = float(ml_cost_data)
                 else:
-                    print(f"DEBUG: completed_at is not a string: {type(completed_at)}")
+                    print(f"DEBUG: Unexpected ml_cost type: {type(ml_cost_data)}")
+                    continue
+                
+                if total_cost is None or total_cost == 0:
+                    continue
+                
+                # Parse the timestamp
+                if isinstance(timestamp, str):
+                    try:
+                        if 'T' in timestamp:
+                            # Handle ISO format with timezone
+                            timestamp_clean = timestamp.replace('Z', '+00:00')
+                            if '+' not in timestamp_clean and not timestamp_clean.endswith('00:00'):
+                                timestamp_clean = timestamp + '+00:00'
+                            item_datetime = datetime.fromisoformat(timestamp_clean)
+                        else:
+                            # Try different date formats
+                            try:
+                                item_datetime = datetime.strptime(timestamp, "%Y-%m-%d")
+                            except ValueError:
+                                item_datetime = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                    except Exception as parse_error:
+                        print(f"DEBUG: Failed to parse timestamp '{timestamp}': {parse_error}")
+                        continue
+                elif isinstance(timestamp, (int, float)):
+                    # Unix timestamp
+                    item_datetime = datetime.fromtimestamp(timestamp)
+                else:
+                    print(f"DEBUG: timestamp is not a string or number: {type(timestamp)}")
                     continue
                 
                 # Check if the item is within our date range
@@ -170,19 +200,19 @@ def get_perplexity_costs(start_date, end_date):
                     matched_count += 1
                     item_date = item_datetime.strftime("%Y-%m-%d")
                     
-                    # Convert ml_cost to float
-                    if isinstance(ml_cost, Decimal):
-                        cost_amount = float(ml_cost)
-                    elif isinstance(ml_cost, (int, float)):
-                        cost_amount = float(ml_cost)
-                    elif isinstance(ml_cost, str):
+                    # Convert total_cost to float
+                    if isinstance(total_cost, Decimal):
+                        cost_amount = float(total_cost)
+                    elif isinstance(total_cost, (int, float)):
+                        cost_amount = float(total_cost)
+                    elif isinstance(total_cost, str):
                         try:
-                            cost_amount = float(ml_cost)
+                            cost_amount = float(total_cost)
                         except ValueError:
-                            print(f"DEBUG: Could not convert ml_cost to float: {ml_cost}")
+                            print(f"DEBUG: Could not convert total_cost to float: {total_cost}")
                             continue
                     else:
-                        print(f"DEBUG: Unexpected ml_cost type: {type(ml_cost)}")
+                        print(f"DEBUG: Unexpected total_cost type: {type(total_cost)}")
                         continue
                     
                     # Add to daily costs with Bedrock-like structure
@@ -194,11 +224,13 @@ def get_perplexity_costs(start_date, end_date):
                     
                     if matched_count <= 5:  # Show first few matches for debugging
                         print(f"DEBUG: Match {matched_count} - Date: {item_date}, Cost: {cost_amount}")
+                        print(f"DEBUG: Original ml_cost structure: {ml_cost_data}")
                     
             except Exception as e:
                 error_count += 1
                 if error_count <= 5:  # Show first few errors for debugging
                     print(f"DEBUG: Error processing item {processed_count}: {e}")
+                    print(f"DEBUG: Item data: {item}")
                 continue
         
         print(f"DEBUG: Processing complete - Processed: {processed_count}, Matched: {matched_count}, Errors: {error_count}")
@@ -208,7 +240,8 @@ def get_perplexity_costs(start_date, end_date):
         formatted_costs = defaultdict(lambda: defaultdict(list))
         for date, cost_list in daily_perplexity_costs.items():
             formatted_costs[date]["Perplexity API"] = cost_list
-            print(f"DEBUG: Date {date} has {len(cost_list)} Perplexity API calls")
+            total_cost_for_date = sum(item['amount'] for item in cost_list)
+            print(f"DEBUG: Date {date} has {len(cost_list)} Perplexity API calls, total cost: ${total_cost_for_date}")
         
         print(f"DEBUG: Returning formatted costs with {len(formatted_costs)} dates")
         return formatted_costs
