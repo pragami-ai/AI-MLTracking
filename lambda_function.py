@@ -88,27 +88,54 @@ def get_service_costs(start, end, services):
 def get_perplexity_costs(start_date, end_date):
     """Fetch Perplexity API costs from Social_Lens DynamoDB table"""
     try:
+        print(f"DEBUG: Starting Perplexity cost fetch for date range: {start_date} to {end_date}")
+        
         # Connect to the Social_Lens table in ap-south-1 region
         social_lens_dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
         table = social_lens_dynamodb.Table(SOCIAL_LENS_TABLE)
+        
+        print(f"DEBUG: Connected to table: {SOCIAL_LENS_TABLE} in ap-south-1")
         
         # Convert dates to datetime for comparison
         start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
         end_datetime = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)  # Include end date
         
+        print(f"DEBUG: Date range converted - Start: {start_datetime}, End: {end_datetime}")
+        
         # Scan the table to get all items (you might want to optimize this with a GSI if table is large)
         response = table.scan()
         items = response['Items']
         
+        print(f"DEBUG: Initial scan returned {len(items)} items")
+        
         # Handle pagination if there are more items
+        total_scanned = len(items)
         while 'LastEvaluatedKey' in response:
             response = table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
             items.extend(response['Items'])
+            total_scanned += len(response['Items'])
+            print(f"DEBUG: Pagination - Total items scanned so far: {total_scanned}")
+        
+        print(f"DEBUG: Total items scanned: {len(items)}")
+        
+        # Debug: Show a sample of items to understand the structure
+        if items:
+            print(f"DEBUG: Sample item structure:")
+            sample_item = items[0]
+            print(f"DEBUG: Sample keys: {list(sample_item.keys())}")
+            if 'completed_at' in sample_item:
+                print(f"DEBUG: Sample completed_at: {sample_item['completed_at']}")
+            if 'ml_cost' in sample_item:
+                print(f"DEBUG: Sample ml_cost: {sample_item['ml_cost']} (type: {type(sample_item['ml_cost'])})")
         
         # Process the data by date
         daily_perplexity_costs = defaultdict(list)
+        processed_count = 0
+        matched_count = 0
+        error_count = 0
         
         for item in items:
+            processed_count += 1
             try:
                 # Extract completed_at and ml_cost
                 completed_at = item.get('completed_at')
@@ -122,18 +149,25 @@ def get_perplexity_costs(start_date, end_date):
                     # Handle different possible timestamp formats
                     try:
                         if 'T' in completed_at:
-                            item_datetime = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+                            # Handle ISO format with timezone
+                            completed_at_clean = completed_at.replace('Z', '+00:00')
+                            if '+' not in completed_at_clean and completed_at_clean.endswith('00:00'):
+                                pass  # Already has timezone
+                            elif '+' not in completed_at_clean and 'Z' not in completed_at:
+                                completed_at_clean = completed_at + '+00:00'
+                            item_datetime = datetime.fromisoformat(completed_at_clean)
                         else:
                             item_datetime = datetime.strptime(completed_at, "%Y-%m-%d")
-                    except:
-                        # Skip items with unparseable dates
+                    except Exception as parse_error:
+                        print(f"DEBUG: Failed to parse date '{completed_at}': {parse_error}")
                         continue
                 else:
-                    # Skip if completed_at is not a string
+                    print(f"DEBUG: completed_at is not a string: {type(completed_at)}")
                     continue
                 
                 # Check if the item is within our date range
                 if start_datetime <= item_datetime < end_datetime:
+                    matched_count += 1
                     item_date = item_datetime.strftime("%Y-%m-%d")
                     
                     # Convert ml_cost to float
@@ -145,8 +179,10 @@ def get_perplexity_costs(start_date, end_date):
                         try:
                             cost_amount = float(ml_cost)
                         except ValueError:
+                            print(f"DEBUG: Could not convert ml_cost to float: {ml_cost}")
                             continue
                     else:
+                        print(f"DEBUG: Unexpected ml_cost type: {type(ml_cost)}")
                         continue
                     
                     # Add to daily costs with Bedrock-like structure
@@ -156,24 +192,36 @@ def get_perplexity_costs(start_date, end_date):
                         "amount": cost_amount
                     })
                     
+                    if matched_count <= 5:  # Show first few matches for debugging
+                        print(f"DEBUG: Match {matched_count} - Date: {item_date}, Cost: {cost_amount}")
+                    
             except Exception as e:
-                # Skip problematic items and continue processing
-                print(f"Error processing item: {e}")
+                error_count += 1
+                if error_count <= 5:  # Show first few errors for debugging
+                    print(f"DEBUG: Error processing item {processed_count}: {e}")
                 continue
+        
+        print(f"DEBUG: Processing complete - Processed: {processed_count}, Matched: {matched_count}, Errors: {error_count}")
+        print(f"DEBUG: Daily costs found for dates: {list(daily_perplexity_costs.keys())}")
         
         # Convert to the same format as Bedrock data
         formatted_costs = defaultdict(lambda: defaultdict(list))
         for date, cost_list in daily_perplexity_costs.items():
             formatted_costs[date]["Perplexity API"] = cost_list
+            print(f"DEBUG: Date {date} has {len(cost_list)} Perplexity API calls")
         
+        print(f"DEBUG: Returning formatted costs with {len(formatted_costs)} dates")
         return formatted_costs
         
     except Exception as e:
+        print(f"DEBUG: Exception in get_perplexity_costs: {e}")
         raise Exception(f"Error fetching Perplexity cost data: {e}")
 
 
 def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
     """Aggregate daily cost data into model and region summaries"""
+    
+    print(f"DEBUG: Aggregating data - Claude: {len(claude_daily)} days, Bedrock: {len(bedrock_daily)} days, Perplexity: {len(perplexity_daily)} days")
     
     # Combine all data
     all_data = {}
@@ -191,6 +239,9 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
         if date not in all_data:
             all_data[date] = {}
         all_data[date].update(services)
+        print(f"DEBUG: Added Perplexity data for date {date}: {services}")
+    
+    print(f"DEBUG: Combined data has {len(all_data)} dates")
     
     # Initialize aggregation structures
     model_totals = defaultdict(float)
@@ -212,6 +263,7 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
                 # Count API calls for Perplexity
                 if service == "Perplexity API":
                     perplexity_call_count += 1
+                    print(f"DEBUG: Found Perplexity API usage - Date: {date}, Amount: {amount}")
                 
                 # Add to model totals
                 model_totals[service] += amount
@@ -223,6 +275,9 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
                 
                 # Add to grand total
                 grand_total += amount
+    
+    print(f"DEBUG: Model totals: {dict(model_totals)}")
+    print(f"DEBUG: Perplexity API call count: {perplexity_call_count}")
     
     # Build model summary
     by_model = {}
@@ -278,6 +333,8 @@ def lambda_handler(event, context):
         end = datetime.today().date()
         start = end - timedelta(days=days)
 
+        print(f"DEBUG: Analysis period - Start: {start}, End: {end}, Days: {days}")
+
         claude_services = [
             "Claude Sonnet 4 (Amazon Bedrock Edition)",
             "Claude 3.5 Sonnet (Amazon Bedrock Edition)",
@@ -294,8 +351,13 @@ def lambda_handler(event, context):
         claude_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), claude_services)
         bedrock_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), bedrock_services)
         
+        print(f"DEBUG: Got Claude data for {len(claude_daily)} days")
+        print(f"DEBUG: Got Bedrock data for {len(bedrock_daily)} days")
+        
         # Get Perplexity costs
         perplexity_daily = get_perplexity_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        
+        print(f"DEBUG: Got Perplexity data for {len(perplexity_daily)} days")
 
         # Aggregate the data into the expected format
         model_usage_summary, grand_total = aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily)
@@ -310,6 +372,10 @@ def lambda_handler(event, context):
             "model_usage_summary": model_usage_summary,
             "grand_total": round(grand_total, 4),
             "timestamp": datetime.utcnow().isoformat(),
+            "debug_info": {
+                "perplexity_days_found": len(perplexity_daily),
+                "total_models_found": len(model_usage_summary["by_model"])
+            }
         }
 
         # Save to DynamoDB (store as JSON string to avoid DynamoDB type formatting)
@@ -324,4 +390,5 @@ def lambda_handler(event, context):
         return {"statusCode": 200, "body": json.dumps({"message": "Report saved", "track_id": track_id}, indent=2)}
 
     except Exception as e:
+        print(f"DEBUG: Main exception: {e}")
         return {"statusCode": 500, "body": json.dumps({"message": "Error", "error": str(e)})}
