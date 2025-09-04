@@ -184,11 +184,13 @@ def get_perplexity_costs(start_date, end_date):
                 if isinstance(timestamp, str):
                     try:
                         if 'T' in timestamp:
-                            # Handle ISO format with timezone
-                            timestamp_clean = timestamp.replace('Z', '+00:00')
-                            if '+' not in timestamp_clean and not timestamp_clean.endswith('00:00'):
-                                timestamp_clean = timestamp + '+00:00'
-                            item_datetime = datetime.fromisoformat(timestamp_clean)
+                            # Handle ISO format - your timestamps don't have timezone, so parse directly
+                            if '.' in timestamp:
+                                # Handle microseconds: 2025-09-04T10:12:50.558677
+                                item_datetime = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%f")
+                            else:
+                                # Handle without microseconds: 2025-09-04T10:12:50
+                                item_datetime = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
                         else:
                             # Try different date formats
                             try:
