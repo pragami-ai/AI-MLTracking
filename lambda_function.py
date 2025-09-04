@@ -84,9 +84,8 @@ def get_service_costs(start, end, services):
 
     return daily_costs
 
-
 def get_perplexity_costs(start_date, end_date):
-    """Fetch Perplexity API costs from Social_Lens DynamoDB table"""
+    """Fetch Perplexity API costs from Social_Lens DynamoDB table with detailed parsing"""
     try:
         print(f"DEBUG: Starting Perplexity cost fetch for date range: {start_date} to {end_date}")
         
@@ -123,7 +122,6 @@ def get_perplexity_costs(start_date, end_date):
             print(f"DEBUG: Sample item structure:")
             sample_item = items[0]
             print(f"DEBUG: Sample keys: {list(sample_item.keys())}")
-            # Check for both completed_at and created_at
             if 'completed_at' in sample_item:
                 print(f"DEBUG: Sample completed_at: {sample_item['completed_at']}")
             if 'created_at' in sample_item:
@@ -136,6 +134,10 @@ def get_perplexity_costs(start_date, end_date):
         processed_count = 0
         matched_count = 0
         error_count = 0
+        total_api_calls = 0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_cost_sum = 0
         
         for item in items:
             processed_count += 1
@@ -149,25 +151,33 @@ def get_perplexity_costs(start_date, end_date):
                         print(f"DEBUG: Item {processed_count} skipped - timestamp: {timestamp}, ml_cost: {ml_cost_data}")
                     continue
                 
-                # Parse ml_cost - it's a JSON object, we need the total_cost
-                total_cost = None
+                # Parse ml_cost - handle different formats
+                ml_cost_parsed = None
                 if isinstance(ml_cost_data, dict):
-                    total_cost = ml_cost_data.get('total_cost')
+                    ml_cost_parsed = ml_cost_data
                 elif isinstance(ml_cost_data, str):
                     try:
-                        ml_cost_json = json.loads(ml_cost_data)
-                        total_cost = ml_cost_json.get('total_cost')
+                        ml_cost_parsed = json.loads(ml_cost_data)
                     except json.JSONDecodeError:
                         print(f"DEBUG: Failed to parse ml_cost JSON: {ml_cost_data}")
                         continue
-                elif isinstance(ml_cost_data, Decimal):
-                    # If it's just a Decimal, use it directly
-                    total_cost = float(ml_cost_data)
                 else:
                     print(f"DEBUG: Unexpected ml_cost type: {type(ml_cost_data)}")
                     continue
                 
-                if total_cost is None or total_cost == 0:
+                if not ml_cost_parsed:
+                    continue
+                
+                # Extract top-level cost information
+                total_cost = ml_cost_parsed.get('total_cost', 0)
+                total_requests = ml_cost_parsed.get('total_requests', 0)
+                total_prompt_tokens_item = ml_cost_parsed.get('total_prompt_tokens', 0)
+                total_completion_tokens_item = ml_cost_parsed.get('total_completion_tokens', 0)
+                total_tokens_item = ml_cost_parsed.get('total_tokens', 0)
+                domain_details = ml_cost_parsed.get('domain_details', [])
+                
+                # Skip if no cost data
+                if total_cost == 0 and not domain_details:
                     continue
                 
                 # Parse the timestamp
@@ -200,48 +210,82 @@ def get_perplexity_costs(start_date, end_date):
                     matched_count += 1
                     item_date = item_datetime.strftime("%Y-%m-%d")
                     
-                    # Convert total_cost to float
-                    if isinstance(total_cost, Decimal):
-                        cost_amount = float(total_cost)
-                    elif isinstance(total_cost, (int, float)):
-                        cost_amount = float(total_cost)
-                    elif isinstance(total_cost, str):
-                        try:
-                            cost_amount = float(total_cost)
-                        except ValueError:
-                            print(f"DEBUG: Could not convert total_cost to float: {total_cost}")
-                            continue
-                    else:
-                        print(f"DEBUG: Unexpected total_cost type: {type(total_cost)}")
-                        continue
+                    # Convert values to proper types
+                    cost_amount = float(total_cost) if total_cost else 0
+                    requests_count = int(total_requests) if total_requests else 0
+                    prompt_tokens = int(total_prompt_tokens_item) if total_prompt_tokens_item else 0
+                    completion_tokens = int(total_completion_tokens_item) if total_completion_tokens_item else 0
+                    total_tokens = int(total_tokens_item) if total_tokens_item else 0
                     
-                    # Add to daily costs with Bedrock-like structure
-                    daily_perplexity_costs[item_date].append({
+                    # Update running totals
+                    total_api_calls += requests_count
+                    total_prompt_tokens += prompt_tokens
+                    total_completion_tokens += completion_tokens
+                    total_cost_sum += cost_amount
+                    
+                    # Create detailed usage entry
+                    usage_entry = {
                         "usage_type": "API-Call",
                         "region": "us-east-1",  # Default region for API calls
-                        "amount": cost_amount
-                    })
+                        "amount": cost_amount,
+                        "requests": requests_count,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                        "domains_processed": len(domain_details)
+                    }
+                    
+                    # Add domain-specific details if available
+                    if domain_details:
+                        domain_summary = []
+                        for domain_detail in domain_details:
+                            domain_info = {
+                                "domain": domain_detail.get('domain', 'unknown'),
+                                "model": domain_detail.get('model', 'sonar'),
+                                "usage": domain_detail.get('usage', {}),
+                                "cost": domain_detail.get('cost', {}),
+                                "citations_count": domain_detail.get('citations_count', 0),
+                                "search_results_count": domain_detail.get('search_results_count', 0)
+                            }
+                            domain_summary.append(domain_info)
+                        
+                        usage_entry["domain_details"] = domain_summary
+                    
+                    # Add to daily costs
+                    daily_perplexity_costs[item_date].append(usage_entry)
                     
                     if matched_count <= 5:  # Show first few matches for debugging
-                        print(f"DEBUG: Match {matched_count} - Date: {item_date}, Cost: {cost_amount}")
-                        print(f"DEBUG: Original ml_cost structure: {ml_cost_data}")
+                        print(f"DEBUG: Match {matched_count} - Date: {item_date}")
+                        print(f"DEBUG:   Cost: ${cost_amount}, Requests: {requests_count}")
+                        print(f"DEBUG:   Tokens: {prompt_tokens} prompt + {completion_tokens} completion = {total_tokens} total")
+                        print(f"DEBUG:   Domains: {len(domain_details)}")
                     
             except Exception as e:
                 error_count += 1
                 if error_count <= 5:  # Show first few errors for debugging
                     print(f"DEBUG: Error processing item {processed_count}: {e}")
-                    print(f"DEBUG: Item data: {item}")
+                    print(f"DEBUG: Item keys: {list(item.keys()) if isinstance(item, dict) else 'Not a dict'}")
                 continue
         
         print(f"DEBUG: Processing complete - Processed: {processed_count}, Matched: {matched_count}, Errors: {error_count}")
+        print(f"DEBUG: Totals - API Calls: {total_api_calls}, Cost: ${total_cost_sum}")
+        print(f"DEBUG: Token Usage - Prompt: {total_prompt_tokens}, Completion: {total_completion_tokens}")
         print(f"DEBUG: Daily costs found for dates: {list(daily_perplexity_costs.keys())}")
         
         # Convert to the same format as Bedrock data
         formatted_costs = defaultdict(lambda: defaultdict(list))
         for date, cost_list in daily_perplexity_costs.items():
             formatted_costs[date]["Perplexity API"] = cost_list
-            total_cost_for_date = sum(item['amount'] for item in cost_list)
-            print(f"DEBUG: Date {date} has {len(cost_list)} Perplexity API calls, total cost: ${total_cost_for_date}")
+            
+            # Calculate daily totals for logging
+            daily_cost = sum(item['amount'] for item in cost_list)
+            daily_requests = sum(item.get('requests', 0) for item in cost_list)
+            daily_prompt_tokens = sum(item.get('prompt_tokens', 0) for item in cost_list)
+            daily_completion_tokens = sum(item.get('completion_tokens', 0) for item in cost_list)
+            
+            print(f"DEBUG: Date {date} - Entries: {len(cost_list)}")
+            print(f"DEBUG:   Cost: ${daily_cost}, Requests: {daily_requests}")
+            print(f"DEBUG:   Tokens: {daily_prompt_tokens} prompt + {daily_completion_tokens} completion")
         
         print(f"DEBUG: Returning formatted costs with {len(formatted_costs)} dates")
         return formatted_costs
@@ -250,9 +294,8 @@ def get_perplexity_costs(start_date, end_date):
         print(f"DEBUG: Exception in get_perplexity_costs: {e}")
         raise Exception(f"Error fetching Perplexity cost data: {e}")
 
-
 def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
-    """Aggregate daily cost data into model and region summaries"""
+    """Aggregate daily cost data into model and region summaries with detailed Perplexity metrics"""
     
     print(f"DEBUG: Aggregating data - Claude: {len(claude_daily)} days, Bedrock: {len(bedrock_daily)} days, Perplexity: {len(perplexity_daily)} days")
     
@@ -272,7 +315,7 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
         if date not in all_data:
             all_data[date] = {}
         all_data[date].update(services)
-        print(f"DEBUG: Added Perplexity data for date {date}: {services}")
+        print(f"DEBUG: Added Perplexity data for date {date}: {len(services.get('Perplexity API', []))} entries")
     
     print(f"DEBUG: Combined data has {len(all_data)} dates")
     
@@ -283,20 +326,50 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
     region_models = defaultdict(lambda: defaultdict(float))
     grand_total = 0
     
-    # Track API call counts for Perplexity
-    perplexity_call_count = 0
+    # Track detailed metrics for Perplexity
+    perplexity_metrics = {
+        "api_calls": 0,
+        "total_requests": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "domains_processed": 0,
+        "unique_domains": set(),
+        "daily_breakdown": {}
+    }
     
     # Aggregate data
     for date, services in all_data.items():
         for service, usage_list in services.items():
+            daily_perplexity_cost = 0
+            daily_perplexity_requests = 0
+            daily_perplexity_tokens = 0
+            
             for usage_data in usage_list:
                 amount = usage_data['amount']
                 region = usage_data['region']
                 
-                # Count API calls for Perplexity
+                # Track detailed metrics for Perplexity
                 if service == "Perplexity API":
-                    perplexity_call_count += 1
-                    print(f"DEBUG: Found Perplexity API usage - Date: {date}, Amount: {amount}")
+                    perplexity_metrics["api_calls"] += 1
+                    perplexity_metrics["total_requests"] += usage_data.get('requests', 0)
+                    perplexity_metrics["prompt_tokens"] += usage_data.get('prompt_tokens', 0)
+                    perplexity_metrics["completion_tokens"] += usage_data.get('completion_tokens', 0)
+                    perplexity_metrics["total_tokens"] += usage_data.get('total_tokens', 0)
+                    perplexity_metrics["domains_processed"] += usage_data.get('domains_processed', 0)
+                    
+                    # Track daily metrics
+                    daily_perplexity_cost += amount
+                    daily_perplexity_requests += usage_data.get('requests', 0)
+                    daily_perplexity_tokens += usage_data.get('total_tokens', 0)
+                    
+                    # Extract unique domains
+                    domain_details = usage_data.get('domain_details', [])
+                    for domain_detail in domain_details:
+                        domain_name = domain_detail.get('domain', 'unknown')
+                        perplexity_metrics["unique_domains"].add(domain_name)
+                    
+                    print(f"DEBUG: Perplexity entry - Date: {date}, Cost: ${amount}, Requests: {usage_data.get('requests', 0)}, Tokens: {usage_data.get('total_tokens', 0)}")
                 
                 # Add to model totals
                 model_totals[service] += amount
@@ -308,9 +381,27 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
                 
                 # Add to grand total
                 grand_total += amount
+            
+            # Store daily Perplexity breakdown
+            if service == "Perplexity API" and daily_perplexity_cost > 0:
+                perplexity_metrics["daily_breakdown"][date] = {
+                    "cost": round(daily_perplexity_cost, 4),
+                    "requests": daily_perplexity_requests,
+                    "tokens": daily_perplexity_tokens,
+                    "entries": len(usage_list)
+                }
+    
+    # Convert unique domains set to list for JSON serialization
+    perplexity_metrics["unique_domains"] = list(perplexity_metrics["unique_domains"])
     
     print(f"DEBUG: Model totals: {dict(model_totals)}")
-    print(f"DEBUG: Perplexity API call count: {perplexity_call_count}")
+    print(f"DEBUG: Perplexity detailed metrics:")
+    print(f"DEBUG:   API Calls: {perplexity_metrics['api_calls']}")
+    print(f"DEBUG:   Total Requests: {perplexity_metrics['total_requests']}")
+    print(f"DEBUG:   Prompt Tokens: {perplexity_metrics['prompt_tokens']}")
+    print(f"DEBUG:   Completion Tokens: {perplexity_metrics['completion_tokens']}")
+    print(f"DEBUG:   Total Tokens: {perplexity_metrics['total_tokens']}")
+    print(f"DEBUG:   Unique Domains: {len(perplexity_metrics['unique_domains'])}")
     
     # Build model summary
     by_model = {}
@@ -324,9 +415,21 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
             "regions": regions
         }
         
-        # Add API call count for Perplexity
+        # Add detailed metrics for Perplexity
         if model == "Perplexity API":
-            model_data["api_calls"] = perplexity_call_count
+            model_data.update({
+                "api_calls": perplexity_metrics["api_calls"],
+                "total_requests": perplexity_metrics["total_requests"],
+                "prompt_tokens": perplexity_metrics["prompt_tokens"],
+                "completion_tokens": perplexity_metrics["completion_tokens"],
+                "total_tokens": perplexity_metrics["total_tokens"],
+                "domains_processed": perplexity_metrics["domains_processed"],
+                "unique_domains_count": len(perplexity_metrics["unique_domains"]),
+                "unique_domains": perplexity_metrics["unique_domains"],
+                "daily_breakdown": perplexity_metrics["daily_breakdown"],
+                "avg_cost_per_request": round(total_cost / perplexity_metrics["total_requests"], 6) if perplexity_metrics["total_requests"] > 0 else 0,
+                "avg_tokens_per_request": round(perplexity_metrics["total_tokens"] / perplexity_metrics["total_requests"], 1) if perplexity_metrics["total_requests"] > 0 else 0
+            })
         
         by_model[model] = model_data
     
