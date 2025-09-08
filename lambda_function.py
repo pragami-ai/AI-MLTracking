@@ -296,10 +296,10 @@ def get_perplexity_costs(start_date, end_date):
         print(f"DEBUG: Exception in get_perplexity_costs: {e}")
         raise Exception(f"Error fetching Perplexity cost data: {e}")
 
-def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
-    """Aggregate daily cost data into model and region summaries with detailed Perplexity metrics"""
+def aggregate_daily_cost_data(claude_daily, bedrock_daily, perplexity_daily):
+    """Aggregate daily cost data keeping the same structure but organized by date"""
 
-    print(f"DEBUG: Aggregating data - Claude: {len(claude_daily)} days, Bedrock: {len(bedrock_daily)} days, Perplexity: {len(perplexity_daily)} days")
+    print(f"DEBUG: Aggregating daily data - Claude: {len(claude_daily)} days, Bedrock: {len(bedrock_daily)} days, Perplexity: {len(perplexity_daily)} days")
 
     # Combine all data
     all_data = {}
@@ -317,30 +317,35 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
         if date not in all_data:
             all_data[date] = {}
         all_data[date].update(services)
-        print(f"DEBUG: Added Perplexity data for date {date}: {len(services.get('Perplexity API', []))} entries")
 
     print(f"DEBUG: Combined data has {len(all_data)} dates")
 
-    # Initialize aggregation structures
-    model_totals = defaultdict(float)
-    model_regions = defaultdict(lambda: defaultdict(float))
-    region_totals = defaultdict(float)
-    region_models = defaultdict(lambda: defaultdict(float))
-    grand_total = 0
+    # Process each date
+    daily_reports = {}
+    overall_grand_total = 0
 
-    # Track detailed metrics for Perplexity
-    perplexity_metrics = {
-        "api_calls": 0,
-        "total_requests": 0,
-        "total_prompt_tokens": 0,
-        "total_completion_tokens": 0,
-        "total_tokens": 0,
-        "total_domains_processed": 0,
-        "unique_domains": set()
-    }
+    for date in sorted(all_data.keys()):
+        services = all_data[date]
+        
+        # Initialize aggregation structures for this date
+        model_totals = defaultdict(float)
+        model_regions = defaultdict(lambda: defaultdict(float))
+        region_totals = defaultdict(float)
+        region_models = defaultdict(lambda: defaultdict(float))
+        daily_total = 0
 
-    # Aggregate data
-    for date, services in all_data.items():
+        # Track detailed metrics for Perplexity for this date
+        perplexity_metrics = {
+            "api_calls": 0,
+            "total_requests": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "total_domains_processed": 0,
+            "unique_domains": set()
+        }
+
+        # Aggregate data for this specific date
         for service, usage_list in services.items():
             for usage_data in usage_list:
                 amount = usage_data['amount']
@@ -361,8 +366,6 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
                         domain_name = domain_detail.get('domain', 'unknown')
                         perplexity_metrics["unique_domains"].add(domain_name)
 
-                    print(f"DEBUG: Perplexity entry - Date: {date}, Cost: ${amount}, Requests: {usage_data.get('requests', 0)}, Tokens: {usage_data.get('total_tokens', 0)}")
-
                 # Add to model totals
                 model_totals[service] += amount
                 model_regions[service][region] += amount
@@ -371,63 +374,64 @@ def aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily):
                 region_totals[region] += amount
                 region_models[region][service] += amount
 
-                # Add to grand total
-                grand_total += amount
+                # Add to daily total
+                daily_total += amount
 
-    # Convert unique domains set to list for JSON serialization
-    perplexity_metrics["unique_domains"] = list(perplexity_metrics["unique_domains"])
+        # Convert unique domains set to list for JSON serialization
+        perplexity_metrics["unique_domains"] = list(perplexity_metrics["unique_domains"])
 
-    print(f"DEBUG: Model totals: {dict(model_totals)}")
-    print(f"DEBUG: Perplexity detailed metrics:")
-    print(f"DEBUG:   API Calls: {perplexity_metrics['api_calls']}")
-    print(f"DEBUG:   Total Requests: {perplexity_metrics['total_requests']}")
-    print(f"DEBUG:   Prompt Tokens: {perplexity_metrics['total_prompt_tokens']}")
-    print(f"DEBUG:   Completion Tokens: {perplexity_metrics['total_completion_tokens']}")
-    print(f"DEBUG:   Total Tokens: {perplexity_metrics['total_tokens']}")
-    print(f"DEBUG:   Unique Domains: {len(perplexity_metrics['unique_domains'])}")
+        # Build model summary for this date
+        by_model = {}
+        for model, total_cost in model_totals.items():
+            percentage = round((total_cost / daily_total) * 100, 1) if daily_total > 0 else 0
+            regions = {region: {"cost": round(cost, 4)} for region, cost in model_regions[model].items()}
 
-    # Build model summary
-    by_model = {}
-    for model, total_cost in model_totals.items():
-        percentage = round((total_cost / grand_total) * 100, 1) if grand_total > 0 else 0
-        regions = {region: {"cost": round(cost, 4)} for region, cost in model_regions[model].items()}
+            model_data = {
+                "total_cost": round(total_cost, 4),
+                "percentage": percentage,
+                "regions": regions
+            }
 
-        model_data = {
-            "total_cost": round(total_cost, 4),
-            "percentage": percentage,
-            "regions": regions
+            # Add detailed metrics for Perplexity
+            if model == "Perplexity API":
+                model_data.update({
+                    "api_calls": perplexity_metrics["api_calls"],
+                    "total_requests": perplexity_metrics["total_requests"],
+                    "total_prompt_tokens": perplexity_metrics["total_prompt_tokens"],
+                    "total_completion_tokens": perplexity_metrics["total_completion_tokens"],
+                    "total_tokens": perplexity_metrics["total_tokens"],
+                    "total_domains_processed": perplexity_metrics["total_domains_processed"],
+                    "unique_domains_count": len(perplexity_metrics["unique_domains"]),
+                    "unique_domains": perplexity_metrics["unique_domains"]
+                })
+
+            by_model[model] = model_data
+
+        # Build region summary for this date
+        by_region = {}
+        for region, total_cost in region_totals.items():
+            models = {model: {"cost": round(cost, 4)} for model, cost in region_models[region].items()}
+
+            by_region[region] = {
+                "total_cost": round(total_cost, 4),
+                "models": models
+            }
+
+        # Store the daily report
+        daily_reports[date] = {
+            "model_usage_summary": {
+                "by_model": by_model,
+                "by_region": by_region
+            },
+            "daily_total": round(daily_total, 4)
         }
 
-        # Add detailed metrics for Perplexity
-        if model == "Perplexity API":
-            model_data.update({
-                "api_calls": perplexity_metrics["api_calls"],
-                "total_requests": perplexity_metrics["total_requests"],
-                "total_prompt_tokens": perplexity_metrics["total_prompt_tokens"],
-                "total_completion_tokens": perplexity_metrics["total_completion_tokens"],
-                "total_tokens": perplexity_metrics["total_tokens"],
-                "total_domains_processed": perplexity_metrics["total_domains_processed"],
-                "unique_domains_count": len(perplexity_metrics["unique_domains"]),
-                "unique_domains": perplexity_metrics["unique_domains"]
-            })
+        # Add to overall total
+        overall_grand_total += daily_total
 
-        by_model[model] = model_data
+        print(f"DEBUG: Date {date} - Models: {len(by_model)}, Regions: {len(by_region)}, Total: ${daily_total}")
 
-    # Build region summary
-    by_region = {}
-    for region, total_cost in region_totals.items():
-        models = {model: {"cost": round(cost, 4)} for model, cost in region_models[region].items()}
-
-        by_region[region] = {
-            "total_cost": round(total_cost, 4),
-            "models": models
-        }
-
-    return {
-        "by_model": by_model,
-        "by_region": by_region
-    }, grand_total
-
+    return daily_reports, overall_grand_total
 
 
 def lambda_handler(event, context):
@@ -445,12 +449,44 @@ def lambda_handler(event, context):
         else:
             body = {}
 
-        days = int(body.get("days", 40))  # default 40 days
+        # Get start_date and end_date from request
+        start_date_str = body.get("start_date")
+        end_date_str = body.get("end_date")
+        
+        if not start_date_str or not end_date_str:
+            return {
+                "statusCode": 400, 
+                "body": json.dumps({
+                    "message": "Missing required parameters", 
+                    "error": "Both start_date and end_date are required in YYYY-MM-DD format"
+                })
+            }
 
-        end = datetime.today().date()
-        start = end - timedelta(days=days)
+        try:
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return {
+                "statusCode": 400, 
+                "body": json.dumps({
+                    "message": "Invalid date format", 
+                    "error": "Dates must be in YYYY-MM-DD format"
+                })
+            }
 
-        print(f"DEBUG: Analysis period - Start: {start}, End: {end}, Days: {days}")
+        if start_date > end_date:
+            return {
+                "statusCode": 400, 
+                "body": json.dumps({
+                    "message": "Invalid date range", 
+                    "error": "start_date must be earlier than or equal to end_date"
+                })
+            }
+
+        # Calculate number of days
+        days_analyzed = (end_date - start_date).days + 1
+
+        print(f"DEBUG: Analysis period - Start: {start_date}, End: {end_date}, Days: {days_analyzed}")
 
         claude_services = [
             "Claude Sonnet 4 (Amazon Bedrock Edition)",
@@ -465,33 +501,33 @@ def lambda_handler(event, context):
         bedrock_services = ["Amazon Bedrock"]
 
         # Get daily costs
-        claude_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), claude_services)
-        bedrock_daily = get_service_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), bedrock_services)
+        claude_daily = get_service_costs(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"), claude_services)
+        bedrock_daily = get_service_costs(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"), bedrock_services)
         
         print(f"DEBUG: Got Claude data for {len(claude_daily)} days")
         print(f"DEBUG: Got Bedrock data for {len(bedrock_daily)} days")
         
         # Get Perplexity costs
-        perplexity_daily = get_perplexity_costs(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
+        perplexity_daily = get_perplexity_costs(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
         
         print(f"DEBUG: Got Perplexity data for {len(perplexity_daily)} days")
 
-        # Aggregate the data into the expected format
-        model_usage_summary, grand_total = aggregate_cost_data(claude_daily, bedrock_daily, perplexity_daily)
+        # Aggregate the data into day-wise format
+        daily_reports, grand_total = aggregate_daily_cost_data(claude_daily, bedrock_daily, perplexity_daily)
 
         # Build report
         report = {
             "period": {
-                "start_date": start.strftime("%Y-%m-%d"),
-                "end_date": end.strftime("%Y-%m-%d"),
-                "days_analyzed": days
+                "start_date": start_date.strftime("%Y-%m-%d"),
+                "end_date": end_date.strftime("%Y-%m-%d"),
+                "days_analyzed": days_analyzed
             },
-            "model_usage_summary": model_usage_summary,
+            "daily_breakdown": daily_reports,
             "grand_total": round(grand_total, 4),
             "timestamp": datetime.utcnow().isoformat(),
             "debug_info": {
                 "perplexity_days_found": len(perplexity_daily),
-                "total_models_found": len(model_usage_summary["by_model"])
+                "total_days_with_data": len(daily_reports)
             }
         }
 
