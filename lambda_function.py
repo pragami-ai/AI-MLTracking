@@ -513,7 +513,7 @@ def lambda_handler(event, context):
         print(f"DEBUG: Got Perplexity data for {len(perplexity_daily)} days")
 
         # Aggregate the data into day-wise format
-        daily_reports, grand_total = aggregate_daily_cost_data(claude_daily, bedrock_daily, perplexity_daily)
+        daily_reports, grand_total = aggregate_daily_cost_data(claude_daily, bedrock_daily, perplexity_daily, start_date, end_date)
 
         # Build report
         report = {
